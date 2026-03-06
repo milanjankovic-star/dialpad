@@ -8,9 +8,9 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
-from app.models import CallLog, CallTranscript, WebhookEvent
+from app.models import CallLog, CallTranscript, RawEvent
 from app.dialpad_client import dialpad_client
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,6 @@ def parse_timestamp(value) -> Optional[datetime]:
         except (ValueError, OSError):
             return None
     if isinstance(value, str):
-        # ISO format string like "2026-03-05 05:06:25.514052"
         for fmt in ["%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"]:
             try:
                 return datetime.strptime(value, fmt)
@@ -56,14 +55,12 @@ def safe_int(value) -> Optional[int]:
         return None
 
 
-async def store_webhook_event(db: AsyncSession, event_type: str, payload: dict) -> WebhookEvent:
-    """Store raw webhook event for idempotency tracking."""
-    event = WebhookEvent(
+async def store_raw_event(db: AsyncSession, event_type: str, payload: dict, event_subtype: str = None) -> RawEvent:
+    """Store raw webhook event in the universal events table."""
+    event = RawEvent(
         event_type=event_type,
-        call_id=payload.get("call_id"),
-        state=payload.get("state"),
+        event_subtype=event_subtype or payload.get("state"),
         payload=payload,
-        processed=False,
     )
     db.add(event)
     await db.flush()
@@ -71,15 +68,16 @@ async def store_webhook_event(db: AsyncSession, event_type: str, payload: dict) 
 
 
 async def is_duplicate_event(db: AsyncSession, call_id: str, state: str) -> bool:
-    """Check if we already processed this call_id + state combo."""
+    """Check if we already have a prior event with this call_id + state."""
     result = await db.execute(
-        select(WebhookEvent).where(
-            WebhookEvent.call_id == call_id,
-            WebhookEvent.state == state,
-            WebhookEvent.processed == True,
+        select(func.count(RawEvent.id)).where(
+            RawEvent.payload["call_id"].astext == str(call_id),
+            RawEvent.event_subtype == state,
         )
     )
-    return result.scalars().first() is not None
+    count = result.scalar()
+    # >1 because we already inserted the current event before checking
+    return count > 1
 
 
 async def process_call_event(db: AsyncSession, payload: dict) -> Optional[CallLog]:
@@ -101,27 +99,25 @@ async def process_call_event(db: AsyncSession, payload: dict) -> Optional[CallLo
     payload["call_id"] = call_id
 
     # Store raw event first
-    webhook_event = await store_webhook_event(db, "call", payload)
+    await store_raw_event(db, "call", payload)
 
     # Idempotency check
     if await is_duplicate_event(db, call_id, state):
         logger.info(f"Duplicate event for call {call_id} state {state}, skipping")
+        await db.commit()
         return None
 
     # For hangup events — store/update the call log
     if state == "hangup":
         call_log = await _upsert_call_log(db, payload)
-        webhook_event.processed = True
         await db.commit()
 
         # Trigger async transcript fetch (don't block the webhook response)
         asyncio.create_task(_fetch_and_store_transcript(call_id))
-
         return call_log
 
     # For call_transcription events — transcript is ready, fetch it
     elif state == "call_transcription":
-        webhook_event.processed = True
         await db.commit()
         asyncio.create_task(_fetch_and_store_transcript(call_id))
         return None
@@ -137,13 +133,11 @@ async def process_call_event(db: AsyncSession, payload: dict) -> Optional[CallLo
             if recording_url:
                 call_log.recording_url = recording_url
                 call_log.was_recorded = True
-                webhook_event.processed = True
-                await db.commit()
+        await db.commit()
         return call_log
 
     # For other states (ringing, connected, missed, etc.) — just log
     else:
-        webhook_event.processed = True
         await db.commit()
         logger.info(f"Call {call_id} state: {state}")
         return None
@@ -179,7 +173,7 @@ async def _upsert_call_log(db: AsyncSession, payload: dict) -> CallLog:
     # Target info (the agent/user/call center handling the call)
     target = payload.get("target", {})
     if target:
-        call_log.target_id = target.get("id")
+        call_log.target_id = str(target.get("id")) if target.get("id") else None
         call_log.target_type = target.get("type")
         call_log.name = target.get("name")
 
@@ -268,7 +262,6 @@ async def _fetch_and_store_transcript(call_id: str):
 
     except Exception as e:
         logger.error(f"Error fetching/storing transcript for call {call_id}: {e}")
-        # Mark as failed
         try:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(

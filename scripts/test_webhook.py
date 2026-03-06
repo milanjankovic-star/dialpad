@@ -108,6 +108,14 @@ SAMPLE_RECORDING = {
     "recording_url": "https://example.com/recording/test_123"
 }
 
+SAMPLE_SMS = {
+    "direction": "outbound",
+    "from_number": "+15555550201",
+    "to_number": "+15555550101",
+    "text": "Hello, this is a test SMS message.",
+    "timestamp": 1741158500,
+}
+
 
 def sign_payload(payload: dict, secret: str | None) -> tuple[bytes, dict]:
     """Sign payload as JWT if secret is set, otherwise return plain JSON."""
@@ -121,7 +129,10 @@ def sign_payload(payload: dict, secret: str | None) -> tuple[bytes, dict]:
 def send_event(url: str, payload: dict, name: str, secret: str | None = None):
     """Send a test event and print the result."""
     print(f"\n  Sending: {name}")
-    print(f"  Payload: call_id={payload.get('call_id')} state={payload.get('state')}")
+    if payload.get("call_id"):
+        print(f"  Payload: call_id={payload.get('call_id')} state={payload.get('state')}")
+    else:
+        print(f"  Payload: {list(payload.keys())}")
 
     try:
         body, headers = sign_payload(payload, secret)
@@ -144,27 +155,31 @@ def main():
     args = parser.parse_args()
 
     secret = args.secret if args.secret else None
-    webhook_url = f"{args.url}/webhooks/call"
+    call_url = f"{args.url}/webhooks/call"
+    sms_url = f"{args.url}/webhooks/sms"
 
     print(f"\n{'='*60}")
     print(f"Testing Dialpad Webhook Service")
-    print(f"Endpoint: {webhook_url}")
+    print(f"Call endpoint: {call_url}")
+    print(f"SMS endpoint:  {sms_url}")
     print(f"JWT signing: {'enabled' if secret else 'disabled (plain JSON)'}")
     print(f"{'='*60}")
 
-    events = [
-        (SAMPLE_HANGUP_EVENT, "Outbound call hangup (Alice → +15555550101)"),
-        (SAMPLE_INBOUND_HANGUP, "Inbound call hangup (+15555550102 → Charlie)"),
-        (SAMPLE_MISSED_CALL, "Missed inbound call (+15555550103 → Dana)"),
-        (SAMPLE_RECORDING, "Recording available for call 1000000000000001"),
-        (SAMPLE_TRANSCRIPT_READY, "Transcript ready for call 1000000000000001"),
+    call_events = [
+        (call_url, SAMPLE_HANGUP_EVENT, "Outbound call hangup (Alice → +15555550101)"),
+        (call_url, SAMPLE_INBOUND_HANGUP, "Inbound call hangup (+15555550102 → Charlie)"),
+        (call_url, SAMPLE_MISSED_CALL, "Missed inbound call (+15555550103 → Dana)"),
+        (call_url, SAMPLE_RECORDING, "Recording available for call 1000000000000001"),
+        (call_url, SAMPLE_TRANSCRIPT_READY, "Transcript ready for call 1000000000000001"),
+        (sms_url, SAMPLE_SMS, "Outbound SMS (+15555550201 → +15555550101)"),
     ]
 
     passed = 0
-    for payload, name in events:
-        if send_event(webhook_url, payload, name, secret=secret):
+    for url, payload, name in call_events:
+        if send_event(url, payload, name, secret=secret):
             passed += 1
         time.sleep(0.5)
+    total = len(call_events)
 
     # Query stored data
     print(f"\n{'='*60}")
@@ -199,7 +214,7 @@ def main():
         print(f"\n  Could not connect to {args.url} for verification")
 
     print(f"\n{'='*60}")
-    print(f"Results: {passed}/{len(events)} events processed successfully")
+    print(f"Results: {passed}/{total} events processed successfully")
     print(f"{'='*60}\n")
 
 

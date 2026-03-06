@@ -12,12 +12,13 @@ from datetime import datetime
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, outerjoin
+from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.database import get_db, init_db, engine
-from app.models import CallLog, CallTranscript, WebhookEvent
-from app.webhook_handler import process_call_event
+from app.models import CallLog, CallTranscript, RawEvent
+from app.webhook_handler import process_call_event, store_raw_event
 from app.dialpad_client import dialpad_client
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Dialpad Webhook Service",
     description="Receives Dialpad call events, stores call logs, and fetches transcripts.",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -105,26 +106,24 @@ async def handle_call_event(request: Request, db: AsyncSession = Depends(get_db)
     except Exception as e:
         logger.error(f"Error processing call event {call_id}: {e}")
         # Still return 200 to prevent Dialpad retries on app errors
-        # The event is stored in webhook_events for later reprocessing
 
     return {"status": "ok", "call_id": call_id, "state": state}
 
 
 @app.post("/webhooks/sms", status_code=200)
 async def handle_sms_event(request: Request, db: AsyncSession = Depends(get_db)):
-    """Receive Dialpad SMS events. Stored as raw events for now."""
+    """Receive Dialpad SMS events. Stored as raw events."""
     raw_body = await request.body()
     payload = verify_webhook_payload(raw_body)
 
     logger.info(f"SMS event received: {payload.get('direction', 'unknown')}")
 
-    event = WebhookEvent(
+    await store_raw_event(
+        db,
         event_type="sms",
         payload=payload,
-        processed=True,
-        received_at=datetime.utcnow(),
+        event_subtype=payload.get("direction"),
     )
-    db.add(event)
     await db.commit()
 
     return {"status": "ok"}
@@ -144,7 +143,14 @@ async def list_calls(
     db: AsyncSession = Depends(get_db),
 ):
     """Query stored call logs with optional filters."""
-    query = select(CallLog).order_by(CallLog.date_started.desc())
+    query = (
+        select(
+            CallLog,
+            CallTranscript.fetch_status.label("transcript_status"),
+        )
+        .outerjoin(CallTranscript, CallLog.call_id == CallTranscript.call_id)
+        .order_by(CallLog.date_started.desc())
+    )
 
     if direction:
         query = query.where(CallLog.direction == direction)
@@ -159,10 +165,10 @@ async def list_calls(
 
     query = query.offset(offset).limit(limit)
     result = await db.execute(query)
-    calls = result.scalars().all()
+    rows = result.all()
 
     return {
-        "count": len(calls),
+        "count": len(rows),
         "calls": [
             {
                 "call_id": c.call_id,
@@ -177,9 +183,9 @@ async def list_calls(
                 "email": c.email,
                 "was_recorded": c.was_recorded,
                 "categories": c.categories,
-                "has_transcript": c.transcript is not None and c.transcript.fetch_status == "success" if c.transcript else False,
+                "has_transcript": transcript_status == "success",
             }
-            for c in calls
+            for c, transcript_status in rows
         ],
     }
 
@@ -250,6 +256,37 @@ async def get_transcript(call_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+@app.get("/api/events")
+async def list_events(
+    event_type: str = None,
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Query raw webhook events with optional type filter."""
+    query = select(RawEvent).order_by(RawEvent.received_at.desc())
+    if event_type:
+        query = query.where(RawEvent.event_type == event_type)
+    query = query.offset(offset).limit(limit)
+
+    result = await db.execute(query)
+    events = result.scalars().all()
+
+    return {
+        "count": len(events),
+        "events": [
+            {
+                "id": e.id,
+                "event_type": e.event_type,
+                "event_subtype": e.event_subtype,
+                "received_at": e.received_at.isoformat() if e.received_at else None,
+                "payload": e.payload,
+            }
+            for e in events
+        ],
+    }
+
+
 @app.get("/api/stats")
 async def get_stats(db: AsyncSession = Depends(get_db)):
     """Quick stats overview."""
@@ -257,14 +294,16 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     total_transcripts = await db.execute(
         select(func.count(CallTranscript.id)).where(CallTranscript.fetch_status == "success")
     )
-    pending_events = await db.execute(
-        select(func.count(WebhookEvent.id)).where(WebhookEvent.processed == False)
+    total_events = await db.execute(select(func.count(RawEvent.id)))
+    sms_events = await db.execute(
+        select(func.count(RawEvent.id)).where(RawEvent.event_type == "sms")
     )
 
     return {
         "total_calls": total_calls.scalar(),
         "total_transcripts": total_transcripts.scalar(),
-        "pending_events": pending_events.scalar(),
+        "total_events": total_events.scalar(),
+        "total_sms": sms_events.scalar(),
     }
 
 
