@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  # PostgreSQL database
+  db:
+    image: postgres:16-alpine
+    container_name: dialpad_postgres
+    environment:
+      POSTGRES_USER: dialpad
+      POSTGRES_PASSWORD: dialpad
+      POSTGRES_DB: dialpad_calls
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dialpad -d dialpad_calls"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI webhook service
+  app:
+    build: .
+    container_name: dialpad_webhook
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dialpad:dialpad@db:5432/dialpad_calls
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./app:/code/app  # Hot-reload during development
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  pgdata:
