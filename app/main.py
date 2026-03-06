@@ -307,6 +307,149 @@ async def get_stats(db: AsyncSession = Depends(get_db)):
     }
 
 
+# ─── View Endpoints (CSV-matched format) ─────────────────────────────
+
+@app.get("/api/view/calls")
+async def view_calls(
+    limit: int = 50,
+    offset: int = 0,
+    direction: str = None,
+    category: str = None,
+    email: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Query call logs from the view (matches CSV export format)."""
+    where_clauses = []
+    params = {"limit": limit, "offset": offset}
+
+    if direction:
+        where_clauses.append("direction = :direction")
+        params["direction"] = direction
+    if category:
+        where_clauses.append("category = :category")
+        params["category"] = category
+    if email:
+        where_clauses.append("email = :email")
+        params["email"] = email
+    if date_from:
+        where_clauses.append("date_started >= :date_from::timestamp")
+        params["date_from"] = date_from
+    if date_to:
+        where_clauses.append("date_started <= :date_to::timestamp")
+        params["date_to"] = date_to
+
+    where_sql = (" AND ".join(where_clauses)) if where_clauses else "1=1"
+
+    sql = text(f"""
+        SELECT * FROM v_call_logs
+        WHERE {where_sql}
+        ORDER BY date_started DESC
+        LIMIT :limit OFFSET :offset
+    """)
+
+    result = await db.execute(sql, params)
+    rows = result.mappings().all()
+
+    return {
+        "count": len(rows),
+        "calls": [dict(r) for r in rows],
+    }
+
+
+@app.get("/api/view/sms")
+async def view_sms(
+    limit: int = 50,
+    offset: int = 0,
+    direction: str = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Query SMS events from the view."""
+    params = {"limit": limit, "offset": offset}
+
+    if direction:
+        sql = text("""
+            SELECT * FROM v_sms_events
+            WHERE direction = :direction
+            ORDER BY event_timestamp DESC
+            LIMIT :limit OFFSET :offset
+        """)
+        params["direction"] = direction
+    else:
+        sql = text("""
+            SELECT * FROM v_sms_events
+            ORDER BY event_timestamp DESC
+            LIMIT :limit OFFSET :offset
+        """)
+
+    result = await db.execute(sql, params)
+    rows = result.mappings().all()
+
+    return {
+        "count": len(rows),
+        "sms": [dict(r) for r in rows],
+    }
+
+
+@app.get("/api/view/transcripts")
+async def view_transcripts(
+    limit: int = 50,
+    offset: int = 0,
+    agent_email: str = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Query transcripts joined with call context from the view."""
+    params = {"limit": limit, "offset": offset}
+
+    if agent_email:
+        sql = text("""
+            SELECT * FROM v_transcripts
+            WHERE agent_email = :agent_email
+              AND fetch_status = 'success'
+            ORDER BY call_date DESC
+            LIMIT :limit OFFSET :offset
+        """)
+        params["agent_email"] = agent_email
+    else:
+        sql = text("""
+            SELECT * FROM v_transcripts
+            WHERE fetch_status = 'success'
+            ORDER BY call_date DESC
+            LIMIT :limit OFFSET :offset
+        """)
+
+    result = await db.execute(sql, params)
+    rows = result.mappings().all()
+
+    return {
+        "count": len(rows),
+        "transcripts": [dict(r) for r in rows],
+    }
+
+
+@app.get("/api/view/recordings")
+async def view_recordings(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """Query recordings from the view."""
+    sql = text("""
+        SELECT * FROM v_recordings
+        ORDER BY call_date DESC
+        LIMIT :limit OFFSET :offset
+    """)
+
+    result = await db.execute(sql, {"limit": limit, "offset": offset})
+    rows = result.mappings().all()
+
+    return {
+        "count": len(rows),
+        "recordings": [dict(r) for r in rows],
+    }
+
+
 # ─── Health Check ────────────────────────────────────────────────────
 
 @app.get("/health")

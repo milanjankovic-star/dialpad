@@ -130,6 +130,8 @@ async def process_call_event(db: AsyncSession, payload: dict) -> Optional[CallLo
         call_log = existing.scalars().first()
         if call_log:
             recording_url = payload.get("recording_url")
+            if isinstance(recording_url, list):
+                recording_url = recording_url[0] if recording_url else None
             if recording_url:
                 call_log.recording_url = recording_url
                 call_log.was_recorded = True
@@ -182,8 +184,12 @@ async def _upsert_call_log(db: AsyncSession, payload: dict) -> CallLog:
     if contact:
         call_log.external_number = contact.get("phone") or call_log.external_number
 
-    # Recording
-    call_log.recording_url = payload.get("recording_url")
+    # Recording (Dialpad sends recording_url as a list)
+    recording_url = payload.get("recording_url")
+    if isinstance(recording_url, list):
+        call_log.recording_url = recording_url[0] if recording_url else None
+    else:
+        call_log.recording_url = recording_url
     if call_log.recording_url:
         call_log.was_recorded = True
 
