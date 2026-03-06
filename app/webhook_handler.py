@@ -21,8 +21,10 @@ def parse_timestamp(value) -> Optional[datetime]:
     if not value:
         return None
     if isinstance(value, (int, float)):
-        # Unix timestamp (seconds)
+        # Unix timestamp — Dialpad may send milliseconds or seconds
         try:
+            if value > 1e12:
+                value = value / 1000  # Convert milliseconds to seconds
             return datetime.utcfromtimestamp(value)
         except (ValueError, OSError):
             return None
@@ -93,6 +95,10 @@ async def process_call_event(db: AsyncSession, payload: dict) -> Optional[CallLo
     if not call_id:
         logger.warning("Received call event without call_id, skipping")
         return None
+
+    # Dialpad sends call_id as int — ensure it's a string for DB storage
+    call_id = str(call_id)
+    payload["call_id"] = call_id
 
     # Store raw event first
     webhook_event = await store_webhook_event(db, "call", payload)

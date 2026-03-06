@@ -96,8 +96,8 @@ async def handle_call_event(request: Request, db: AsyncSession = Depends(get_db)
     raw_body = await request.body()
     payload = verify_webhook_payload(raw_body)
 
-    call_id = payload.get("call_id", "unknown")
-    state = payload.get("state", "unknown")
+    call_id = str(payload.get("call_id", "unknown"))
+    state = str(payload.get("state", "unknown"))
     logger.info(f"Call event received: call_id={call_id} state={state}")
 
     try:

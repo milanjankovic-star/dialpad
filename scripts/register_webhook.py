@@ -19,10 +19,12 @@ Options:
 import argparse
 import os
 import sys
+from pathlib import Path
+
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 def main():
@@ -47,10 +49,7 @@ def main():
         print("ERROR: DIALPAD_API_KEY not set in .env or environment")
         sys.exit(1)
 
-    if args.production:
-        base_url = "https://dialpad.com/api/v2"
-    else:
-        base_url = "https://sandbox.dialpad.com/api/v2"
+    base_url = os.getenv("DIALPAD_API_BASE_URL", "https://sandbox.dialpad.com/api/v2").rstrip("/")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
