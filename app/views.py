@@ -222,9 +222,15 @@ SELECT
     ct.call_id,
     ct.summary,
     ct.full_text,
-    ct.moments,
+    ct.moments                                                              AS lines,
     ct.fetch_status,
-    ct.fetched_at AT TIME ZONE 'America/Los_Angeles'                                 AS fetched_at,
+    ct.fetched_at AT TIME ZONE 'America/Los_Angeles'                        AS fetched_at,
+
+    -- Count of actual spoken transcript lines vs AI moment tags
+    (SELECT count(*) FROM json_array_elements(ct.moments) elem
+     WHERE elem->>'type' = 'transcript')                                    AS transcript_line_count,
+    (SELECT count(*) FROM json_array_elements(ct.moments) elem
+     WHERE elem->>'type' = 'moment')                                        AS ai_moment_count,
 
     -- Call context from the hangup event
     hangup.payload->>'direction'                                            AS direction,

@@ -238,18 +238,41 @@ async def _fetch_and_store_transcript(call_id: str):
         now = datetime.utcnow()
 
         if transcript_data:
-            moments = transcript_data.get("moments", [])
-            summary = transcript_data.get("summary")
+            # Dialpad returns { "call_id": "...", "lines": [...] }
+            # Each line has: name, content, time, type ("transcript" or "moment")
+            # type="transcript" → actual spoken words
+            # type="moment"    → AI tags (call_purpose_category, whole_call_summary, etc.)
+            lines = transcript_data.get("lines", [])
 
+            # Separate transcript lines from AI moment tags
+            transcript_lines = [l for l in lines if l.get("type") == "transcript"]
+            moment_lines = [l for l in lines if l.get("type") == "moment"]
+
+            # Build full text from transcript lines
             full_text_parts = []
-            for moment in moments:
-                speaker = moment.get("speaker", "Unknown")
-                txt = moment.get("text", "")
-                full_text_parts.append(f"{speaker}: {txt}")
-            full_text = "\n".join(full_text_parts)
+            for line in transcript_lines:
+                speaker = line.get("name", "Unknown")
+                content = line.get("content", "")
+                full_text_parts.append(f"{speaker}: {content}")
+            full_text = "\n".join(full_text_parts) if full_text_parts else None
 
-            fetch_status = "success"
-            logger.info(f"Transcript fetched for call {call_id} ({len(moments)} moments)")
+            # Extract AI summary from moment lines if available
+            summary_parts = []
+            for m in moment_lines:
+                content = m.get("content", "")
+                if content and content != "call_purpose_category" and content != "whole_call_summary":
+                    summary_parts.append(content)
+            summary = "; ".join(summary_parts) if summary_parts else None
+
+            # Store all lines as the moments JSON (both transcript + AI moments)
+            moments = lines
+
+            fetch_status = "success" if full_text else "empty"
+            logger.info(
+                f"Transcript fetched for call {call_id}: "
+                f"{len(transcript_lines)} transcript lines, "
+                f"{len(moment_lines)} AI moments"
+            )
         else:
             moments = None
             summary = None

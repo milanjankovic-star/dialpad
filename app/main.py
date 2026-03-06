@@ -493,6 +493,33 @@ async def debug_refetch_transcript(call_id: str, db: AsyncSession = Depends(get_
         "full_text_length": len(transcript.full_text) if transcript and transcript.full_text else 0,
         "moments_count": len(transcript.moments) if transcript and transcript.moments else 0,
         "summary": transcript.summary if transcript else None,
+        "full_text_preview": transcript.full_text[:300] if transcript and transcript.full_text else None,
+    }
+
+
+@app.post("/api/debug/refetch-all-transcripts")
+async def debug_refetch_all_transcripts(db: AsyncSession = Depends(get_db)):
+    """
+    Re-fetch all transcripts that have empty full_text.
+    Use this once after deploying the fix to backfill existing records.
+    """
+    from app.webhook_handler import _fetch_and_store_transcript
+
+    result = await db.execute(
+        select(CallTranscript).where(
+            (CallTranscript.full_text == None) | (CallTranscript.full_text == "")
+        )
+    )
+    empty_transcripts = result.scalars().all()
+
+    refetched = []
+    for t in empty_transcripts:
+        await _fetch_and_store_transcript(t.call_id)
+        refetched.append(t.call_id)
+
+    return {
+        "refetched_count": len(refetched),
+        "call_ids": refetched,
     }
 
 
