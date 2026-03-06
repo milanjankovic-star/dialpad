@@ -450,6 +450,52 @@ async def view_recordings(
     }
 
 
+# ─── Debug / Manual Transcript Fetch ─────────────────────────────────
+
+@app.get("/api/debug/transcript/{call_id}")
+async def debug_fetch_transcript(call_id: str):
+    """
+    Manually fetch a transcript from Dialpad API and return the raw response.
+    Use this to see exactly what Dialpad returns for a given call_id.
+    Does NOT store anything — just shows you the raw API response.
+    """
+    raw_data = await dialpad_client.get_transcript(call_id)
+
+    return {
+        "call_id": call_id,
+        "api_returned_none": raw_data is None,
+        "raw_response": raw_data,
+        "response_keys": list(raw_data.keys()) if isinstance(raw_data, dict) else None,
+        "moments_count": len(raw_data.get("moments", [])) if isinstance(raw_data, dict) else 0,
+        "has_summary": bool(raw_data.get("summary")) if isinstance(raw_data, dict) else False,
+    }
+
+
+@app.post("/api/debug/refetch-transcript/{call_id}")
+async def debug_refetch_transcript(call_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Re-fetch and store a transcript for a specific call.
+    Use this to retry failed or empty transcripts.
+    """
+    from app.webhook_handler import _fetch_and_store_transcript
+    await _fetch_and_store_transcript(call_id)
+
+    # Return the stored result
+    result = await db.execute(
+        select(CallTranscript).where(CallTranscript.call_id == call_id)
+    )
+    transcript = result.scalars().first()
+
+    return {
+        "call_id": call_id,
+        "fetch_status": transcript.fetch_status if transcript else "not_found",
+        "has_full_text": bool(transcript.full_text) if transcript else False,
+        "full_text_length": len(transcript.full_text) if transcript and transcript.full_text else 0,
+        "moments_count": len(transcript.moments) if transcript and transcript.moments else 0,
+        "summary": transcript.summary if transcript else None,
+    }
+
+
 # ─── Health Check ────────────────────────────────────────────────────
 
 @app.get("/health")

@@ -2,6 +2,7 @@
 Async HTTP client for Dialpad API v2.
 Handles transcript fetching with retry logic.
 """
+import json
 import logging
 import httpx
 from typing import Optional
@@ -49,10 +50,19 @@ class DialpadClient:
 
             if response.status_code == 200:
                 data = response.json()
-                logger.info(f"Transcript fetched for call {call_id}")
+                # Log the actual response structure for debugging
+                keys = list(data.keys()) if isinstance(data, dict) else type(data).__name__
+                moments_count = len(data.get("moments", [])) if isinstance(data, dict) else 0
+                raw_preview = json.dumps(data)[:500]
+                logger.info(
+                    f"Transcript API response for call {call_id}: "
+                    f"keys={keys}, moments={moments_count}, "
+                    f"has_summary={bool(data.get('summary') if isinstance(data, dict) else False)}, "
+                    f"preview={raw_preview}"
+                )
                 return data
             elif response.status_code == 404:
-                logger.info(f"No transcript available for call {call_id}")
+                logger.info(f"No transcript available for call {call_id} (404)")
                 return None
             elif response.status_code == 429:
                 logger.warning(f"Rate limited fetching transcript for call {call_id}")
@@ -60,7 +70,7 @@ class DialpadClient:
             else:
                 logger.error(
                     f"Failed to fetch transcript for call {call_id}: "
-                    f"{response.status_code} {response.text}"
+                    f"{response.status_code} {response.text[:300]}"
                 )
                 return None
 
