@@ -8,7 +8,8 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models import CallLog, CallTranscript, RawEvent
 from app.dialpad_client import dialpad_client
@@ -233,52 +234,69 @@ async def _fetch_and_store_transcript(call_id: str):
     try:
         transcript_data = await dialpad_client.get_transcript(call_id)
 
+        # Build the values for upsert
+        now = datetime.utcnow()
+
+        if transcript_data:
+            moments = transcript_data.get("moments", [])
+            summary = transcript_data.get("summary")
+
+            full_text_parts = []
+            for moment in moments:
+                speaker = moment.get("speaker", "Unknown")
+                txt = moment.get("text", "")
+                full_text_parts.append(f"{speaker}: {txt}")
+            full_text = "\n".join(full_text_parts)
+
+            fetch_status = "success"
+            logger.info(f"Transcript fetched for call {call_id} ({len(moments)} moments)")
+        else:
+            moments = None
+            summary = None
+            full_text = None
+            fetch_status = "not_available"
+            logger.info(f"No transcript available for call {call_id}")
+
         async with AsyncSessionLocal() as db:
-            # Check if transcript record exists
-            result = await db.execute(
-                select(CallTranscript).where(CallTranscript.call_id == call_id)
+            # Use PostgreSQL ON CONFLICT to handle the race condition
+            # between hangup and call_transcription events
+            stmt = pg_insert(CallTranscript).values(
+                call_id=call_id,
+                summary=summary,
+                moments=moments,
+                full_text=full_text,
+                fetch_status=fetch_status,
+                fetched_at=now,
+            ).on_conflict_do_update(
+                index_elements=["call_id"],
+                set_={
+                    "summary": summary,
+                    "moments": moments,
+                    "full_text": full_text,
+                    "fetch_status": fetch_status,
+                    "fetched_at": now,
+                },
             )
-            transcript = result.scalars().first()
-
-            if not transcript:
-                transcript = CallTranscript(call_id=call_id)
-                db.add(transcript)
-
-            if transcript_data:
-                moments = transcript_data.get("moments", [])
-                transcript.moments = moments
-                transcript.summary = transcript_data.get("summary")
-
-                # Build full text from moments
-                full_text_parts = []
-                for moment in moments:
-                    speaker = moment.get("speaker", "Unknown")
-                    text = moment.get("text", "")
-                    full_text_parts.append(f"{speaker}: {text}")
-                transcript.full_text = "\n".join(full_text_parts)
-
-                transcript.fetch_status = "success"
-                logger.info(f"Transcript stored for call {call_id} ({len(moments)} moments)")
-            else:
-                transcript.fetch_status = "not_available"
-                logger.info(f"No transcript available for call {call_id}")
-
-            transcript.fetched_at = datetime.utcnow()
+            await db.execute(stmt)
             await db.commit()
+            logger.info(f"Transcript upserted for call {call_id} ({fetch_status})")
 
     except Exception as e:
         logger.error(f"Error fetching/storing transcript for call {call_id}: {e}")
         try:
             async with AsyncSessionLocal() as db:
-                result = await db.execute(
-                    select(CallTranscript).where(CallTranscript.call_id == call_id)
+                stmt = pg_insert(CallTranscript).values(
+                    call_id=call_id,
+                    fetch_status="failed",
+                    fetched_at=datetime.utcnow(),
+                ).on_conflict_do_update(
+                    index_elements=["call_id"],
+                    set_={
+                        "fetch_status": "failed",
+                        "fetched_at": datetime.utcnow(),
+                    },
                 )
-                transcript = result.scalars().first()
-                if not transcript:
-                    transcript = CallTranscript(call_id=call_id)
-                    db.add(transcript)
-                transcript.fetch_status = "failed"
-                transcript.fetched_at = datetime.utcnow()
+                await db.execute(stmt)
                 await db.commit()
         except Exception as inner_e:
             logger.error(f"Error marking transcript as failed for {call_id}: {inner_e}")
