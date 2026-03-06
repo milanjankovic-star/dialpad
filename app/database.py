@@ -42,7 +42,9 @@ async def init_db():
         # Create tables
         await conn.run_sync(Base.metadata.create_all)
 
-        # Create/replace views
+        # Drop and recreate views (CREATE OR REPLACE can't rename columns)
+        for view_name in ["v_call_logs", "v_sms_events", "v_transcripts", "v_recordings"]:
+            await conn.execute(text(f"DROP VIEW IF EXISTS {view_name} CASCADE"))
         for view_sql in ALL_VIEWS:
             await conn.execute(text(view_sql))
 
